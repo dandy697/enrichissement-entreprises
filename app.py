@@ -20,8 +20,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. CONFIGURATION INTELLIGENTE ---
-
+# --- CONFIGURATION SECTORIELLE ---
 SECTOR_CONFIG = {
     "Agriculture / Livestock / Seafood": {"naf": ["01", "02", "03"], "kw": ["agriculture", "élevage", "pêche", "agricole", "bio"]},
     "Banking": {"naf": ["641"], "kw": ["banque", "crédit", "bancaire", "épargne", "financement"]},
@@ -47,9 +46,9 @@ SECTOR_CONFIG = {
     "Transportation / Logistics": {"naf": ["49", "50", "51", "52", "53"], "kw": ["transport", "logistique", "livraison", "fret", "colis", "supply chain"]}
 }
 
-NAF_BLACKLIST = ["7010Z", "6420Z"] 
+NAF_BLACKLIST = ["7010Z", "6420Z"]
 
-# --- 2. FONCTIONS TECHNIQUES ---
+# --- FONCTIONS ---
 
 def clean_input(text):
     text = str(text).strip()
@@ -63,33 +62,33 @@ def clean_input(text):
 def clean_text_content(text):
     return re.sub(r'[^\w\s]', '', text.lower()) if text else ""
 
-def get_session():
+def get_scraping_session():
+    """Session pour Google/Site Web (Besoin de ressembler à Chrome)"""
     s = requests.Session()
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7"
     })
     return s
 
-def analyze_web(company_name, session):
-    """Tentative de scraping avec protection anti-crash"""
+def analyze_web(company_name):
+    """Scraping avec protection anti-ban"""
+    session = get_scraping_session()
     try:
-        # Recherche URL via Google avec pause pour éviter le blocage
-        time.sleep(1) 
+        # Pause pour éviter le ban Google
+        time.sleep(1.5)
         query = f"{company_name} site officiel france"
         
         try:
-            # On tente la recherche
             urls = list(search(query, num_results=1, lang="fr"))
         except Exception:
-            return "Web Bloqué (Cloud)", 0, "⭐"
+            return "Web Bloqué (Google 429)", 0, "⭐"
 
         if not urls:
             return "Web Introuvable", 0, "⭐"
             
         url = urls[0]
         try:
-            resp = session.get(url, timeout=10) # Timeout allongé
+            resp = session.get(url, timeout=10)
         except:
             return "Site Inaccessible", 0, "⭐"
 
@@ -107,7 +106,7 @@ def analyze_web(company_name, session):
             if any(x in links_str for x in ['tripadvisor', 'thefork', 'ubereats', 'deliveroo']):
                 return "Hotels / Restaurants", 100, "⭐⭐"
 
-            # Open Graph
+            # Analyse Mots Clés
             text_content = ""
             og_desc = soup.find("meta", property="og:description")
             if og_desc:
@@ -138,7 +137,6 @@ def analyze_web(company_name, session):
 def process_single_company(raw_input):
     search_term = clean_input(raw_input)
     api_url = "https://recherche-entreprises.api.gouv.fr/search"
-    session = get_session()
     
     res = {
         "Statut": "❌", "Entrée": raw_input, "Nom Officiel": "-", 
@@ -146,10 +144,13 @@ def process_single_company(raw_input):
         "Effectif": "-", "Lien Annuaire": "-"
     }
     
-    # 1. TENTATIVE API GOUV (Séparée pour ne pas crasher tout le reste)
+    # 1. APPEL API GOUV (Version standard sans headers suspects)
     data = None
     try:
-        r = session.get(api_url, params={"q": search_term, "per_page": 1}, timeout=15) # Timeout 15s
+        # On utilise des headers simples pour ne pas être bloqué par l'API Gouv
+        headers = {"User-Agent": "FirmSectorTool/1.0"}
+        r = requests.get(api_url, params={"q": search_term, "per_page": 1}, headers=headers, timeout=20)
+        
         if r.status_code == 200 and r.json():
             data = r.json()[0]
             res["Statut"] = "✅"
@@ -161,14 +162,17 @@ def process_single_company(raw_input):
             cp = data.get('code_postal', '')
             res["Région"] = f"Dep. {cp[:2]}" if cp else "-"
         else:
-             res["Statut"] = "⚠️" # API ne trouve pas
-             return res
+            # On affiche le code erreur si ça plante
+            res["Statut"] = "⚠️"
+            res["Nom Officiel"] = f"Err API: {r.status_code}"
+            return res
+            
     except Exception as e:
         res["Statut"] = "⚠️"
-        res["Nom Officiel"] = "Erreur Connexion API"
+        res["Nom Officiel"] = f"Err Connexion: {str(e)[:20]}" # Affiche l'erreur technique
         return res
 
-    # 2. ANALYSE SECTORIELLE (Seulement si on a trouvé l'entreprise)
+    # 2. LOGIQUE METIER
     if data:
         try:
             naf = data.get('activite_principale', '').replace('.', '')
@@ -185,28 +189,24 @@ def process_single_company(raw_input):
                             break
                     if found_naf: break
             
-            # B. Web Scraping (Si NAF échec)
+            # B. Web Scraping
             if not found_naf:
-                # On met une valeur par défaut en cas de crash Web
-                res["Industrie"] = "NAF: " + naf + " (Web Bloqué)"
+                res["Industrie"] = f"NAF: {naf} (Recherche web...)"
                 res["Confiance"] = "⭐"
+                web_sector, score, conf = analyze_web(data.get('nom_complet'))
                 
-                # On tente le web
-                web_sector, score, conf = analyze_web(data.get('nom_complet'), session)
-                
-                # Si le web a marché (pas de blocage), on écrase
                 if "Bloqué" not in web_sector:
                     res["Industrie"] = web_sector
                     res["Confiance"] = conf
+                else:
+                    res["Industrie"] = f"NAF: {naf} (Web Bloqué)"
                     
         except Exception:
-            # Si le scraping plante totalement, on garde au moins les infos API
             pass
 
     return res
 
-# --- 3. INTERFACE ---
-
+# --- INTERFACE ---
 st.title("Enrichissement entreprises")
 st.header("Recherche d'entreprise")
 st.markdown("Trouvez le **secteur d'activité précis** grâce aux données officielles et au site web.")
@@ -236,8 +236,8 @@ if st.button("Lancer l'analyse", type="primary"):
         bar = st.progress(0)
         status = st.empty()
         
-        # Max workers réduit à 3 pour éviter d'être banni par Google trop vite
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        # Max Workers réduit pour éviter le blocage
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_input = {executor.submit(process_single_company, i): i for i in inputs}
             
             for idx, future in enumerate(concurrent.futures.as_completed(future_to_input)):
