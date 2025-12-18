@@ -4,3 +4,4 @@ requests
 beautifulsoup4
 googlesearch-python
 openpyxl
+urllib3
