@@ -8,6 +8,10 @@ import re
 import io
 import concurrent.futures
 import time
+import urllib3
+
+# Désactiver les avertissements de sécurité pour le contournement SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(page_title="Enrichissement entreprises", page_icon="🏢", layout="wide")
@@ -63,7 +67,6 @@ def clean_text_content(text):
     return re.sub(r'[^\w\s]', '', text.lower()) if text else ""
 
 def get_scraping_session():
-    """Session pour Google/Site Web (Besoin de ressembler à Chrome)"""
     s = requests.Session()
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -71,11 +74,9 @@ def get_scraping_session():
     return s
 
 def analyze_web(company_name):
-    """Scraping avec protection anti-ban"""
     session = get_scraping_session()
     try:
-        # Pause pour éviter le ban Google
-        time.sleep(1.5)
+        time.sleep(1) # Pause Politesse
         query = f"{company_name} site officiel france"
         
         try:
@@ -88,14 +89,14 @@ def analyze_web(company_name):
             
         url = urls[0]
         try:
-            resp = session.get(url, timeout=10)
+            # Verify=False pour éviter l'erreur SSL du Cloud
+            resp = session.get(url, timeout=10, verify=False)
         except:
             return "Site Inaccessible", 0, "⭐"
 
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
             
-            # Signature Sociale
             links = [a.get('href', '') for a in soup.find_all('a', href=True)]
             links_str = " ".join(links).lower()
             
@@ -106,7 +107,6 @@ def analyze_web(company_name):
             if any(x in links_str for x in ['tripadvisor', 'thefork', 'ubereats', 'deliveroo']):
                 return "Hotels / Restaurants", 100, "⭐⭐"
 
-            # Analyse Mots Clés
             text_content = ""
             og_desc = soup.find("meta", property="og:description")
             if og_desc:
@@ -144,12 +144,15 @@ def process_single_company(raw_input):
         "Effectif": "-", "Lien Annuaire": "-"
     }
     
-    # 1. APPEL API GOUV (Version standard sans headers suspects)
     data = None
     try:
-        # On utilise des headers simples pour ne pas être bloqué par l'API Gouv
-        headers = {"User-Agent": "FirmSectorTool/1.0"}
-        r = requests.get(api_url, params={"q": search_term, "per_page": 1}, headers=headers, timeout=20)
+        # Headers pour passer pour un navigateur normal et non un bot
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "application/json"
+        }
+        # Verify=False est crucial sur Streamlit Cloud pour API Gouv
+        r = requests.get(api_url, params={"q": search_term, "per_page": 1}, headers=headers, timeout=20, verify=False)
         
         if r.status_code == 200 and r.json():
             data = r.json()[0]
@@ -162,23 +165,20 @@ def process_single_company(raw_input):
             cp = data.get('code_postal', '')
             res["Région"] = f"Dep. {cp[:2]}" if cp else "-"
         else:
-            # On affiche le code erreur si ça plante
             res["Statut"] = "⚠️"
-            res["Nom Officiel"] = f"Err API: {r.status_code}"
+            res["Nom Officiel"] = f"Code: {r.status_code}"
             return res
             
     except Exception as e:
         res["Statut"] = "⚠️"
-        res["Nom Officiel"] = f"Err Connexion: {str(e)[:20]}" # Affiche l'erreur technique
+        res["Nom Officiel"] = "Blocage Cloud (Utilisez Local)"
         return res
 
-    # 2. LOGIQUE METIER
     if data:
         try:
             naf = data.get('activite_principale', '').replace('.', '')
             found_naf = False
             
-            # A. Test NAF
             if naf and naf not in [x.replace('.', '') for x in NAF_BLACKLIST]:
                 for sector, config in SECTOR_CONFIG.items():
                     for prefix in config['naf']:
@@ -189,9 +189,8 @@ def process_single_company(raw_input):
                             break
                     if found_naf: break
             
-            # B. Web Scraping
             if not found_naf:
-                res["Industrie"] = f"NAF: {naf} (Recherche web...)"
+                res["Industrie"] = f"NAF: {naf} (Recherche...)"
                 res["Confiance"] = "⭐"
                 web_sector, score, conf = analyze_web(data.get('nom_complet'))
                 
@@ -236,7 +235,6 @@ if st.button("Lancer l'analyse", type="primary"):
         bar = st.progress(0)
         status = st.empty()
         
-        # Max Workers réduit pour éviter le blocage
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             future_to_input = {executor.submit(process_single_company, i): i for i in inputs}
             
