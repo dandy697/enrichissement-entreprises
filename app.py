@@ -12,7 +12,6 @@ import time
 # --- CONFIGURATION DE LA PAGE ---
 st.set_page_config(page_title="Enrichissement entreprises", page_icon="🏢", layout="wide")
 
-# Masquer le menu hamburger et ajuster le style
 st.markdown("""
 <style>
     #MainMenu {visibility: hidden;}
@@ -48,12 +47,11 @@ SECTOR_CONFIG = {
     "Transportation / Logistics": {"naf": ["49", "50", "51", "52", "53"], "kw": ["transport", "logistique", "livraison", "fret", "colis", "supply chain"]}
 }
 
-NAF_BLACKLIST = ["7010Z", "6420Z"] # Holdings -> On force le Web
+NAF_BLACKLIST = ["7010Z", "6420Z"] 
 
 # --- 2. FONCTIONS TECHNIQUES ---
 
 def clean_input(text):
-    """Extrait le nom de l'entreprise si c'est un email."""
     text = str(text).strip()
     if "@" in text:
         try:
@@ -66,7 +64,6 @@ def clean_text_content(text):
     return re.sub(r'[^\w\s]', '', text.lower()) if text else ""
 
 def get_session():
-    """Crée une session qui imite un vrai navigateur (Anti-Bot)."""
     s = requests.Session()
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -75,51 +72,48 @@ def get_session():
     return s
 
 def analyze_web(company_name, session):
-    """
-    Scraping Avancé V2 :
-    1. Signature Sociale (Liens sortants)
-    2. Open Graph (Description cachée)
-    3. Mots-clés classiques
-    """
+    """Tentative de scraping avec protection anti-crash"""
     try:
-        # Recherche URL via Google
+        # Recherche URL via Google avec pause pour éviter le blocage
+        time.sleep(1) 
         query = f"{company_name} site officiel france"
-        urls = list(search(query, num_results=1, lang="fr"))
+        
+        try:
+            # On tente la recherche
+            urls = list(search(query, num_results=1, lang="fr"))
+        except Exception:
+            return "Web Bloqué (Cloud)", 0, "⭐"
+
         if not urls:
             return "Web Introuvable", 0, "⭐"
             
         url = urls[0]
         try:
-            resp = session.get(url, timeout=5)
+            resp = session.get(url, timeout=10) # Timeout allongé
         except:
             return "Site Inaccessible", 0, "⭐"
 
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, 'html.parser')
             
-            # --- A. SIGNATURE SOCIALE (Social Fingerprinting) ---
-            # On cherche des liens spécifiques qui trahissent l'activité
+            # Signature Sociale
             links = [a.get('href', '') for a in soup.find_all('a', href=True)]
             links_str = " ".join(links).lower()
             
             if any(x in links_str for x in ['github.com', 'gitlab.com']):
-                return "Tech / Software", 100, "⭐⭐" # Forte probabilité Tech
+                return "Tech / Software", 100, "⭐⭐"
             if 'doctolib.fr' in links_str:
                 return "Healthcare / Medical Services", 100, "⭐⭐"
             if any(x in links_str for x in ['tripadvisor', 'thefork', 'ubereats', 'deliveroo']):
                 return "Hotels / Restaurants", 100, "⭐⭐"
 
-            # --- B. OPEN GRAPH & CONTENU ---
-            # On cherche la description meta (souvent plus propre)
+            # Open Graph
             text_content = ""
             og_desc = soup.find("meta", property="og:description")
             if og_desc:
                 text_content += og_desc.get("content", "") + " "
-            
-            # On ajoute le titre et les H1
             text_content += " ".join([t.get_text() for t in soup.find_all(['title', 'h1'])])
             
-            # Comptage mots-clés
             clean = clean_text_content(text_content)
             words = clean.split()
             counts = Counter(words)
@@ -134,7 +128,7 @@ def analyze_web(company_name, session):
                     best_sector = sector
             
             if best_score > 0:
-                return best_sector, best_score, "⭐⭐" # Déduit par sémantique
+                return best_sector, best_score, "⭐⭐"
             
     except Exception:
         pass
@@ -142,7 +136,6 @@ def analyze_web(company_name, session):
     return "Non identifié", 0, "⭐"
 
 def process_single_company(raw_input):
-    """Fonction exécutée par chaque 'Worker' en parallèle."""
     search_term = clean_input(raw_input)
     api_url = "https://recherche-entreprises.api.gouv.fr/search"
     session = get_session()
@@ -153,26 +146,35 @@ def process_single_company(raw_input):
         "Effectif": "-", "Lien Annuaire": "-"
     }
     
+    # 1. TENTATIVE API GOUV (Séparée pour ne pas crasher tout le reste)
+    data = None
     try:
-        # Appel API Gouv
-        r = session.get(api_url, params={"q": search_term, "per_page": 1}, timeout=3)
+        r = session.get(api_url, params={"q": search_term, "per_page": 1}, timeout=15) # Timeout 15s
         if r.status_code == 200 and r.json():
             data = r.json()[0]
-            res["Nom Officiel"] = data.get('nom_complet')
             res["Statut"] = "✅"
+            res["Nom Officiel"] = data.get('nom_complet', 'Inconnu')
             res["Adresse"] = data.get('adresse', '')
             res["Effectif"] = data.get('tranche_effectif_salarie', 'NC')
             res["Lien Annuaire"] = f"https://annuaire-entreprises.data.gouv.fr/entreprise/{data.get('siren')}"
             
-            # Région simple
             cp = data.get('code_postal', '')
             res["Région"] = f"Dep. {cp[:2]}" if cp else "-"
+        else:
+             res["Statut"] = "⚠️" # API ne trouve pas
+             return res
+    except Exception as e:
+        res["Statut"] = "⚠️"
+        res["Nom Officiel"] = "Erreur Connexion API"
+        return res
 
-            # --- ANALYSE SECTORIELLE ---
+    # 2. ANALYSE SECTORIELLE (Seulement si on a trouvé l'entreprise)
+    if data:
+        try:
             naf = data.get('activite_principale', '').replace('.', '')
             found_naf = False
             
-            # 1. Test Code NAF
+            # A. Test NAF
             if naf and naf not in [x.replace('.', '') for x in NAF_BLACKLIST]:
                 for sector, config in SECTOR_CONFIG.items():
                     for prefix in config['naf']:
@@ -183,18 +185,27 @@ def process_single_company(raw_input):
                             break
                     if found_naf: break
             
-            # 2. Si échec NAF ou Blacklist -> Web Scraping
+            # B. Web Scraping (Si NAF échec)
             if not found_naf:
+                # On met une valeur par défaut en cas de crash Web
+                res["Industrie"] = "NAF: " + naf + " (Web Bloqué)"
+                res["Confiance"] = "⭐"
+                
+                # On tente le web
                 web_sector, score, conf = analyze_web(data.get('nom_complet'), session)
-                res["Industrie"] = web_sector
-                res["Confiance"] = conf
+                
+                # Si le web a marché (pas de blocage), on écrase
+                if "Bloqué" not in web_sector:
+                    res["Industrie"] = web_sector
+                    res["Confiance"] = conf
+                    
+        except Exception:
+            # Si le scraping plante totalement, on garde au moins les infos API
+            pass
 
-    except Exception as e:
-        res["Statut"] = "⚠️"
-        
     return res
 
-# --- 3. INTERFACE UTILISATEUR ---
+# --- 3. INTERFACE ---
 
 st.title("Enrichissement entreprises")
 st.header("Recherche d'entreprise")
@@ -205,8 +216,7 @@ inputs = []
 
 with tab1:
     st.markdown("##### Copier-Coller")
-    st.markdown("Collez vos emails ou noms d'entreprises (un par ligne)")
-    raw_txt = st.text_area("", height=150, placeholder="contact@keyrus.com\nCarrefour\nLVMH")
+    raw_txt = st.text_area("Un nom par ligne", height=150, placeholder="Keyrus\nCarrefour")
     if raw_txt:
         inputs = [x.strip() for x in raw_txt.split('\n') if x.strip()]
 
@@ -218,7 +228,6 @@ with tab2:
         if not df.empty:
             inputs = df.iloc[:, 0].astype(str).tolist()
 
-# --- MOTEUR D'EXECUTION (MULTITHREADING) ---
 if st.button("Lancer l'analyse", type="primary"):
     if not inputs:
         st.warning("Veuillez saisir des données.")
@@ -227,17 +236,14 @@ if st.button("Lancer l'analyse", type="primary"):
         bar = st.progress(0)
         status = st.empty()
         
-        # Exécution Parallèle (5 à la fois)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # Max workers réduit à 3 pour éviter d'être banni par Google trop vite
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             future_to_input = {executor.submit(process_single_company, i): i for i in inputs}
             
             for idx, future in enumerate(concurrent.futures.as_completed(future_to_input)):
                 data = future.result()
                 results.append(data)
-                # Mise à jour barre
-                prog = (idx + 1) / len(inputs)
-                bar.progress(prog)
-                status.text(f"Analyse en cours : {idx+1}/{len(inputs)}")
+                bar.progress((idx + 1) / len(inputs))
         
         status.success("Terminé !")
         time.sleep(1)
@@ -246,24 +252,17 @@ if st.button("Lancer l'analyse", type="primary"):
         
         df_res = pd.DataFrame(results)
         
-        # --- CONFIGURATION DU TABLEAU ---
         st.dataframe(
             df_res,
             column_config={
                 "Lien Annuaire": st.column_config.LinkColumn("Lien Annuaire", display_text="Voir"),
                 "Statut": st.column_config.TextColumn("Statut", width="small"),
-                # Largeur forcée pour éviter le retour à la ligne
                 "Industrie": st.column_config.TextColumn("Industrie", width="large"),
-                # Infobulle (Tooltip)
-                "Confiance": st.column_config.TextColumn(
-                    "Confiance", 
-                    help="⭐⭐⭐ = Source Officielle (NAF)\n⭐⭐ = Web (Signature Sociale/Mots-clés)\n⭐ = Incertain"
-                )
+                "Confiance": st.column_config.TextColumn("Confiance", help="⭐⭐⭐ = Officiel | ⭐⭐ = Web | ⭐ = Incertain")
             },
             use_container_width=True
         )
         
-        # Export Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df_res.to_excel(writer, index=False)
